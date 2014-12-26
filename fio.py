@@ -22,12 +22,13 @@ import subprocess
 import sys
 
 
-def _run_benchmark_once(iodepth, action, blocksize, timeout=30, size="1G"):
+def _run_benchmark_once(iodepth, action, blocksize, timeout=30, size="1G",
+                        filename="testo"):
     p = subprocess.Popen(["fio", "--name=%s" % action,
                      "--rw=%s" % action,
                      "--blocksize=%s" % blocksize, "--direct=1",
                      "--ioengine=libaio", "--iodepth=%d" % iodepth,
-                     "--filename=testo",
+                     "--filename=%s" % filename,
                      "--size=%s" % size,
                      "--timeout=%d" % timeout,
                      "--runtime=%d" % timeout,
@@ -58,10 +59,16 @@ def _parse_args():
         default=["512", "4K", "64K"])
     parser.add_argument(
         "--timeout", metavar="timeout", type=int,
-        help="actions to run", default=30)
+        help="runtime of a single run", default=30)
+    parser.add_argument(
+        "--total-time", metavar="total_time", type=int,
+        help="total execution time", default=None)
     parser.add_argument(
         "--output", metavar="output", type=argparse.FileType("w"),
-        help="actions to run", default=sys.stdout)
+        help="filename to output", default=sys.stdout)
+    parser.add_argument(
+        "--benchmark-file", metavar="file", help="filename run benchmarks on",
+        default="testo")
 
 
     return parser.parse_args()
@@ -99,8 +106,13 @@ def main():
                      for product in itertools.product(
                             args.iodepths, args.actions,
                             args.blocksizes)]
+
+    timeout = args.timeout
+    if args.total_time:
+        timeout = args.total_time / len(benchmark_set)
                                 
-    results = run_benchmark_set(benchmark_set, timeout=args.timeout)
+    results = run_benchmark_set(benchmark_set, timeout=timeout,
+                                filename=args.benchmark_file)
 
     args.output.write(json.dumps(results))
 
