@@ -204,7 +204,6 @@ def run_benchmark_set(executors, benchmark_set, timeout=30):
 
         result = Results()
         for count, th in enumerate(threads):
-            th.join()
             executor, th_res = q.get()
 
             if th_res is not None:
@@ -237,6 +236,9 @@ def run_benchmark_set(executors, benchmark_set, timeout=30):
                     result.bw_dev = (sq_dev / (count + 1)) ** 0.5
             else:
                 print "Node", executor.node, "fails to execute fio"
+
+        for th in threads:
+            th.join()
 
         yield result
 
