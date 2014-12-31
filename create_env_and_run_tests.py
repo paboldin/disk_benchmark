@@ -218,7 +218,7 @@ def main():
     ips = ['172.16.0.128']
     for ip, host in create_vms(nova, 1, 'ceph-test', vol_sz=4, img_name='TestVM').items():
         #create_vms(nova, 1, 'koder', img_name='cirros-0.3.2-x86_64-uec')
-        prepare_host('os_rsa', ip, '/tmp/fio')
+        prepare_host('os_rsa', ip, 'fio')
         ips.append(ip)
     print "All setup done! Ips =", " ".join(ips)
     print "Starting tests"
