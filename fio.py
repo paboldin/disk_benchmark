@@ -56,11 +56,12 @@ class Results(object):
 
 
 def subprocess_executor(cmd):
+    print "execute on localhost:", " ".join(cmd)
     return subprocess.Popen(cmd, stdout=subprocess.PIPE).stdout.read()
 subprocess_executor.node = 'localhost'
 
 
-def get_paramiko_executor(host, user, password):
+def get_paramiko_executor(host, user, password, key_file=None):
     try:
         import paramiko
     except ImportError:
@@ -68,10 +69,21 @@ def get_paramiko_executor(host, user, password):
         raise ValueError(msg)
 
     ssh = paramiko.SSHClient()
+    ssh.load_host_keys('/dev/null')
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    ssh.connect(host, username=user, password=password)
+    ssh.known_hosts = None
+
+    if password == '-':
+        if key_file is None:
+            raise ValueError("password is '-' and no key_file provided")
+        else:
+            ssh.connect(host, username=user, key_filename=key_file,
+                        look_for_keys=False)
+    else:
+        ssh.connect(host, username=user, password=password)
 
     def paramiko_executor(cmd):
+        print "Try to execute", " ".join(cmd)
         stdin, stdout, stderr = ssh.exec_command(" ".join(cmd))
         return stdout.read()
 
@@ -80,18 +92,18 @@ def get_paramiko_executor(host, user, password):
     return paramiko_executor
 
 
-def _run_benchmark_once(executor, params, filename, timeout):
-    cmd_line = ["fio",
+def _run_benchmark_once(executor, params, filename, timeout, fio_path='fio'):
+    cmd_line = [fio_path,
                 "--name=%s" % params.action,
                 "--rw=%s" % params.action,
                 "--blocksize=%s" % params.blocksize,
                 "--ioengine=libaio",
                 "--iodepth=%d" % params.iodepth,
                 "--filename=%s" % filename,
-                "--size={}".format(params.size),
+                "--size={0}".format(params.size),
                 "--timeout=%d" % timeout,
                 "--runtime=%d" % timeout,
-                "--numjobs={}".format(params.concurence),
+                "--numjobs={0}".format(params.concurence),
                 "--output-format=json"]
 
     if params.direct_io:
@@ -126,7 +138,7 @@ def _parse_args(args):
         default=["read", "write", "randread", "randwrite"])
     parser.add_argument(
         "--blocksize", metavar="BLOCKSIZE", nargs="+", type=_type_size,
-        help="actions to run", default=["512", "4K", "64K"])
+        help="single operation block size", default=["512", "4K", "64K"])
     parser.add_argument(
         "--timeout", metavar="TIMEOUT", type=int,
         help="runtime of a single run", default=30)
@@ -145,15 +157,19 @@ def _parse_args(args):
     parser.add_argument(
         "executors", metavar="executors",
         help="all executors", nargs='+')
-
+    parser.add_argument(
+        "-k", "--key-file", metavar="RSA_SECRET_KEY_FNAME",
+        dest='keyfile')
+    parser.add_argument("--fio", metavar="FIO_PATH", default='fio')
     return parser.parse_args(args)
 
 
-def run_benchmark(executor, benchmark, filename, timeout):
+def run_benchmark(executor, benchmark, filename, timeout, fio_path='fio'):
     job_output = _run_benchmark_once(executor,
                                      benchmark,
                                      filename,
-                                     timeout)
+                                     timeout,
+                                     fio_path)
     job_output = job_output["jobs"][0]
     res = Results()
     res.parameters = benchmark.__dict__
@@ -174,15 +190,17 @@ def run_benchmark(executor, benchmark, filename, timeout):
     return res
 
 
-def run_benchmark_th(res_q, executor, benchmark, filename, timeout):
+def run_benchmark_th(res_q, executor, benchmark, filename, timeout, fio_path):
     try:
-        res = run_benchmark(executor, benchmark, filename, timeout)
+        res = run_benchmark(executor, benchmark, filename, timeout, fio_path)
     except:
+        import traceback
+        traceback.print_exc()
         res = None
     res_q.put((executor, res))
 
 
-def run_benchmark_set(executors, benchmark_set, timeout=30):
+def run_benchmark_set(executors, benchmark_set, timeout=30, fio_path='fio'):
     """Runs a set of benchmarks and returns `fio` provided results.
 
     :param benchmark_set: an iterable that returns `BenchmarkOption` instances
@@ -196,7 +214,7 @@ def run_benchmark_set(executors, benchmark_set, timeout=30):
         threads = []
         stime = time.time()
         for (executor, filename) in executors:
-            params = (q, executor, benchmark, filename, timeout)
+            params = (q, executor, benchmark, filename, timeout, fio_path)
             th = threading.Thread(None, run_benchmark_th, None, params)
             th.daemon = True
             threads.append(th)
@@ -209,7 +227,7 @@ def run_benchmark_set(executors, benchmark_set, timeout=30):
             if th_res is not None:
                 print "At +", int(time.time() - stime), "sec ",
                 print "get res from", executor.node,
-                print "{}~{}".format(int(th_res.bw_mean), int(th_res.bw_dev))
+                print "{0}~{1}".format(int(th_res.bw_mean), int(th_res.bw_dev))
 
                 if result.block_size is None:
                     result.type = th_res.type
@@ -243,7 +261,7 @@ def run_benchmark_set(executors, benchmark_set, timeout=30):
         yield result
 
 
-def create_executor(uri):
+def create_executor(uri, key_file):
     exec_name, params = uri.split("://", 1)
     if exec_name == 'local':
         return (subprocess_executor, params)
@@ -251,34 +269,13 @@ def create_executor(uri):
         user_password, host_path = params.split("@", 1)
         host, path = host_path.split(":", 1)
         user, password = user_password.split(":", 1)
-        return (get_paramiko_executor(host, user, password), path)
+        return (get_paramiko_executor(host, user, password, key_file), path)
     else:
         raise ValueError("Can't instantiate executor from {!r}".format(uri))
 
 
-def main(args):
-    args = _parse_args(args)
-
-    params = [1], args.iodepth, args.action, args.blocksize, [args.iosize]
-    all_combinations = itertools.product(*params)
-
-    benchmark_set = [BenchmarkOption(*product)
-                     for product in all_combinations]
-
-    timeout = args.timeout
-    if args.total_time:
-        if timeout:
-            print "Both timeout and total_time parameters provided.",
-            print "timeout option will be ignored."
-        timeout = args.total_time / len(benchmark_set)
-
-    executors = map(create_executor, args.executors)
-
-    results = run_benchmark_set(executors,
-                                benchmark_set,
-                                timeout=timeout)
-
-    if args.format == 'table':
+def format_results(args_obj, results):
+    if args_obj.format == 'table':
         try:
             import texttable
             table = texttable.Texttable()
@@ -296,18 +293,52 @@ def main(args):
         if table is not None:
             table.add_row([
                 res.type, res.block_size, res.concurence,
-                res.iodepth, "{}~{}".format(int(res.bw_mean),
-                                            int(res.bw_dev))])
+                res.iodepth, "{0}~{1}".format(int(res.bw_mean),
+                                              int(res.bw_dev))])
         else:
-            print res.type, res.block_size, res.concurence,
-            print res.iodepth, "{}~{}".format(int(res.bw_mean),
-                                              int(res.bw_dev))
+            res_string = "{0} {1} {2} {3} {4}~{5}".format(res.type,
+                                                          res.block_size,
+                                                          res.concurence,
+                                                          res.iodepth,
+                                                          int(res.bw_mean),
+                                                          int(res.bw_dev))
+            yield res_string
 
     if table is not None:
-        print table.draw() + "\n"
+        yield table.draw()
+
+
+def do_main(args_obj):
+    params = ([1], args_obj.iodepth, args_obj.action,
+              args_obj.blocksize, [args_obj.iosize])
+    all_combinations = itertools.product(*params)
+
+    benchmark_set = [BenchmarkOption(*product)
+                     for product in all_combinations]
+
+    timeout = args_obj.timeout
+    if args_obj.total_time:
+        if timeout:
+            print "Both timeout and total_time parameters provided.",
+            print "timeout option will be ignored."
+        timeout = args_obj.total_time / len(benchmark_set)
+
+    executors = [create_executor(uri, args_obj.keyfile)
+                 for uri in args_obj.executors]
+
+    result = run_benchmark_set(executors,
+                               benchmark_set,
+                               timeout=timeout,
+                               fio_path=args_obj.fio)
+    for line in format_results(args_obj, result):
+        args_obj.output.write(line + "\n")
 
     return 0
 
+
+def main(args):
+    args_obj = _parse_args(args)
+    return do_main(args_obj)
 
 if __name__ == '__main__':
     exit(main(sys.argv[1:]))
