@@ -159,8 +159,9 @@ def clear_all(nova):
     for vol in cinder.volumes.list():
         if isinstance(vol.display_name, basestring):
             if re.match(r'ceph-test-\d+', vol.display_name):
-                print "Deleting volume", vol.display_name
-                cinder.volumes.delete(vol)
+                if vol.status in ('available', 'error'):
+                    print "Deleting volume", vol.display_name
+                    cinder.volumes.delete(vol)
 
     print "Clearing done (yet some volumes may still deleting)"
 
@@ -196,9 +197,9 @@ def run_fio_test(key_file, ips):
     with open(res_name, "w") as fd:
         fp = FIOParams()
         fp.output = fd
-        fp.iodepth = [1, 4, 16, 64]
-        fp.action = ['randwrite', 'randread']
-        fp.blocksize = [512, 4096, 64 * 1024]
+        fp.iodepth = [4] #[1, 4, 16, 64]
+        fp.action = ["randwrite"] #['randwrite', 'randread']
+        fp.blocksize = [512] #[512, 4096, 64 * 1024]
         fp.iosize = '3GB'
         fp.keyfile = key_file
         fp.fio = '/tmp/fio'
@@ -218,7 +219,7 @@ def main():
     ips = ['172.16.0.128']
     for ip, host in create_vms(nova, 1, 'ceph-test', vol_sz=4, img_name='TestVM').items():
         #create_vms(nova, 1, 'koder', img_name='cirros-0.3.2-x86_64-uec')
-        prepare_host('os_rsa', ip, 'fio')
+        prepare_host('ceph_test_rsa', ip, 'fio')
         ips.append(ip)
     print "All setup done! Ips =", " ".join(ips)
     print "Starting tests"
