@@ -7,7 +7,7 @@ import paramiko
 from novaclient.client import Client as n_client
 from cinderclient.v1.client import Client as c_client
 
-import fio
+import bench
 
 
 def ostack_get_creds():
@@ -238,7 +238,9 @@ def run_fio_test(key_file, ips, dst_fio_path):
         fp.executors = ["ssh://cirros:-@{0}:/media/ceph/test.ceph".format(ip)
                         for ip in ips]
         fp.format = 'plain'
-        fio.do_main(fp)
+        fp.bench = 'fio'
+        fp.binpath = 'fio'
+        bench.do_main(fp)
 
 
 def main():
