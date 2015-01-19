@@ -1,5 +1,5 @@
-import re
 import subprocess
+
 
 class BenchmarkOption(object):
     def __init__(self, concurence, iodepth, action, blocksize, size):
@@ -10,6 +10,7 @@ class BenchmarkOption(object):
         self.size = size
         self.direct_io = False
         self.use_hight_io_priority = True
+        self.sync = False
 
 
 class RunOptions(object):
@@ -30,6 +31,18 @@ class Results(object):
         self.bw_mean = None
         self.bw_max = None
         self.bw_min = None
+
+    def __str__(self):
+        frmt = "<{0} bsize={1} type={4} bw={2}~{3}>".format
+        return frmt(self.__class__.__name__,
+                    self.block_size,
+                    self.bw_mean,
+                    self.bw_dev,
+                    self.type)
+
+    def __repr__(self):
+        return str(self)
+
 
 def subprocess_executor(cmd):
     print "execute on localhost:", " ".join(cmd)

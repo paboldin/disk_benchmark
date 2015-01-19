@@ -17,21 +17,23 @@ import time
 import json
 import os.path
 
-from common import BenchmarkOption, RunOptions, Results
+from common import Results
+
 
 def run_fio_once(executor, params, filename, timeout, fio_path='fio'):
     cmd_line = [fio_path,
                 "--name=%s" % params.action,
                 "--rw=%s" % params.action,
-                "--blocksize=%s" % params.blocksize,
+                "--blocksize=%sk" % params.blocksize,
                 "--ioengine=libaio",
                 "--iodepth=%d" % params.iodepth,
                 "--filename=%s" % filename,
-                "--size={0}".format(params.size),
+                "--size={0}k".format(params.size),
                 "--timeout=%d" % timeout,
                 "--runtime=%d" % timeout,
                 "--numjobs={0}".format(params.concurence),
-                "--output-format=json"]
+                "--output-format=json",
+                "--sync=" + ('1' if params.sync else '0')]
 
     if params.direct_io:
         cmd_line.append("--direct=1")
@@ -47,6 +49,7 @@ def run_fio_once(executor, params, filename, timeout, fio_path='fio'):
     open(fname, "w").write(raw_out)
     return json.loads(raw_out)
 
+
 def run_fio(executor, benchmark, filename, timeout, fio_path='fio'):
     job_output = run_fio_once(executor,
                               benchmark,
@@ -55,20 +58,13 @@ def run_fio(executor, benchmark, filename, timeout, fio_path='fio'):
                               fio_path)
     job_output = job_output["jobs"][0]
     res = Results()
-    res.parameters = benchmark.__dict__
-    res.type = benchmark.action
 
     if benchmark.action in ('write', 'randwrite'):
         raw_result = job_output['write']
     else:
         raw_result = job_output['read']
 
-    res.block_size = benchmark.blocksize
-    res.concurence = benchmark.concurence
-    res.iodepth = benchmark.iodepth
-
     for field in 'bw_dev bw_mean bw_max bw_min'.split():
         setattr(res, field, raw_result[field])
 
     return res
-

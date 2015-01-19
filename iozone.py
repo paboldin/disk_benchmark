@@ -1,52 +1,52 @@
 import re
-import time
-import subprocess
-
-from common import BenchmarkOption, RunOptions, Results
+from common import BenchmarkOption, Results
 
 # run iozone disk io tests
 # see http://www.iozone.org/ for more detailes
 
 
-def install_iozone_source(ver="3_397"):
-    "install iozone from source"
-    if not exists('/tmp/iozone'):
-        with cd('/tmp'):
-            run('rm -f iozone{0}.tar'.format(ver))
-            run('rm -rf iozone{0}'.format(ver))
-            run('wget http://www.iozone.org/src/current/iozone{0}.tar'\
-                        .format(ver))
-            run('tar xf iozone{0}.tar'.format(ver))
-            with cd('iozone{0}/src/current'.format(ver)):
-                run('make linux-AMD64')
-                run('cp iozone /tmp')
-    return '/tmp/iozone'
+# def install_iozone_source(ver="3_397"):
+#     "install iozone from source"
+#     if not exists('/tmp/iozone'):
+#         with cd('/tmp'):
+#             run('rm -f iozone{0}.tar'.format(ver))
+#             run('rm -rf iozone{0}'.format(ver))
+#             run('wget http://www.iozone.org/src/current/iozone{0}.tar'\
+#                         .format(ver))
+#             run('tar xf iozone{0}.tar'.format(ver))
+#             with cd('iozone{0}/src/current'.format(ver)):
+#                 run('make linux-AMD64')
+#                 run('cp iozone /tmp')
+#     return '/tmp/iozone'
 
-def install_iozone():
-    "install iozone package"
-    return which('iozone')
+# def install_iozone():
+#     "install iozone package"
+#     return which('iozone')
+
 
 class IOZoneParser(object):
     "class to parse iozone results"
-    
+
     start_tests = re.compile(r"^\s+KB\s+reclen\s+")
     resuts = re.compile(r"[\s0-9]+")
-    mt_iozone_re = re.compile(r"\s+Children see throughput " + \
-                    "for\s+\d+\s+(?P<cmd>.*?)\s+=\s+(?P<perf>[\d.]+)\s+KB/sec")
+    mt_iozone_re = re.compile(r"\s+Children see throughput " +
+                              r"for\s+\d+\s+(?P<cmd>.*?)\s+=\s+" +
+                              r"(?P<perf>[\d.]+)\s+KB/sec")
 
-    cmap = {'initial writers' : 'write',
-        'rewriters' : 'rewrite',
-        'initial readers':'read',
-        're-readers' : 'reread',
-        'random readers' : 'random read',
-        'random writers' : 'random write'
-        }
+    cmap = {'initial writers': 'write',
+            'rewriters': 'rewrite',
+            'initial readers': 'read',
+            're-readers': 'reread',
+            'random readers': 'random read',
+            'random writers': 'random write'}
 
+    string1 = "                           " + \
+              "                   random  random    " + \
+              "bkwd   record   stride                                   "
 
-    string1 = "                                              random  random    " + \
-          "bkwd   record   stride                                   "
-    string2 = "KB  reclen   write rewrite    read    reread    read   write    " + \
-          "read  rewrite     read   fwrite frewrite   fread  freread"
+    string2 = "KB  reclen   write rewrite    " + \
+              "read    reread    read   write    " + \
+              "read  rewrite     read   fwrite frewrite   fread  freread"
 
     @classmethod
     def apply_parts(cls, parts, string, sep=' \t\n'):
@@ -55,45 +55,45 @@ class IOZoneParser(object):
             _, start, stop = part
             start += add_offset
             add_offset = 0
-            
+
             while stop + add_offset < len(string) and \
-                        string[stop + add_offset] not in sep:
+                      string[stop + add_offset] not in sep:
                 add_offset += 1
-                
+
             yield part, string[start:stop + add_offset]
 
     @classmethod
     def make_positions(cls):
         items = [i for i in cls.string2.split() if i]
-        
+
         pos = 0
         cls.positions = []
-        
+
         for item in items:
             npos = cls.string2.index(item, 0 if pos == 0 else pos + 1)
             cls.positions.append([item, pos, npos + len(item)])
             pos = npos + len(item)
-        
+
         for itm, val in cls.apply_parts(cls.positions, cls.string1):
             if val.strip():
                 itm[0] = val.strip() + " " + itm[0]
-        
+
     @classmethod
-    def parse_iozone_res(cls, res, mthreads = False):
+    def parse_iozone_res(cls, res, mthreads=False):
         parsed_res = None
-        
+
         sres = res.split('\n')
-        
+
         if not mthreads:
             for pos, line in enumerate(sres[1:]):
                 if line.strip() == cls.string2 and \
                             sres[pos].strip() == cls.string1.strip():
                     add_pos = line.index(cls.string2)
                     parsed_res = {}
-                    
+
                     npos = [(name, start + add_pos, stop + add_pos)
-                                for name, start, stop in cls.positions]
-                    
+                            for name, start, stop in cls.positions]
+
                     for itm, res in cls.apply_parts(npos, sres[pos + 2]):
                         if res.strip() != '':
                             parsed_res[itm[0]] = int(res.strip())
@@ -115,93 +115,57 @@ class IOZoneParser(object):
 IOZoneParser.make_positions()
 
 
-def do_run_iozone(path, size, bsize, threads,
-                  sync=True,
-                  seq_write=True,
-                  random_write=False):
+def run_iozone(executor, params, filename, timeout, iozone_path='iozone'):
+    cmd = [iozone_path]
 
-    iozone_exec = 'iozone'
+    if params.sync:
+        cmd.append('-o')
 
-    threads = int(threads)
+    all_files = []
+    threads = int(params.concurence)
     if 1 != threads:
-        threads_opt = '-t {0}'.format(threads)
-        path_opt = "-F " + " ".join(path % i for i in range(threads))
+        cmd.extend(('-t', str(threads), '-F'))
+        filename = filename + "_{}"
+        cmd.extend(filename % i for i in range(threads))
+        all_files.extend(filename % i for i in range(threads))
     else:
-        threads_opt = ''
-        if '%d' in path:
-            path = path % (0,)
-        path_opt = '-f {0}'.format(path)
+        cmd.extend(('-f', filename))
+        all_files.append(filename)
 
-    if sync:
-        sync = '-o'
+    cmd.append('-i')
+
+    if params.action == 'write':
+        cmd.append("0")
+    elif params.action == 'randwrite':
+        cmd.extend(("0", "-i", "2"))
     else:
-        sync = ''
+        raise ValueError("Unknown action {0!r}".format(params.action))
 
-    tests = []
+    cmd.extend(('-s', str(params.size)))
+    cmd.extend(('-r', str(params.blocksize)))
 
-    if seq_write:
-        tests.append("0")
-    if random_write:
-        tests.append("2")
+    raw_res = executor(cmd)
+    parsed_res = IOZoneParser.parse_iozone_res(raw_res, threads > 1)
 
-    tests = " ".join("-i " + test for test in tests)
+    res = Results()
 
-    cmd = '{iozone_exec} {sync} {tests} {th} -s {size} -r {bsize} {fpath}'.\
-          format(iozone_exec=iozone_exec,
-                 th=threads_opt,
-                 size=size,
-                 bsize=bsize,
-                 tests=tests,
-                 fpath=path_opt,
-                 sync=sync)
+    if params.action == 'write':
+        res.bw_mean = parsed_res['write']
+    elif params.action == 'randwrite':
+        res.bw_mean = parsed_res['random write']
 
-    # res = executor(cmd)
-    res = subprocess.check_output(cmd, shell=True)
+    res.bw_dev = 0
+    res.bw_max = res.bw_mean
+    res.bw_min = res.bw_mean
 
-    parsed_res = IOZoneParser.parse_iozone_res(res, threads > 1)
-
-    parsed_res['cmd'] = cmd
-    parsed_res['fpath'] = parsed_res['cmd'].split()[-1]
-
-    return parsed_res
+    return res
 
 
-def iozone(path, mark,
-           size=10, bsize=4, threads=1,
-           results=None, **tests):
-    """
-    run iozone, parse results and return dict of results
-    params:
-    mark : '/' separated string
-    size : test file size in kb
-    bsize : test block size in kb
-    thread : number of threads to run
-    remote_sensor : string with sensor type to run on remote host
-                    for more info see fablib.recipes.sensor docs
+if __name__ == "__main__":
+    from common import subprocess_executor
+    params = BenchmarkOption(1, 1, 'write', 4, 4 * 1024)
+    print run_iozone(subprocess_executor, params, "/tmp/xxx.bin", 0)
 
-    local_sensor : string with sensor type to run on local host
-                    for more info see fablib.recipes.sensor docs
-
-    results = {} or None. Will put results in this dict with key of
-                current host name
-    """
-
-    size = int(size)
-    bsize = int(bsize)
-    threads = int(threads)
-
-    parsed_res = do_run_iozone(path, size, bsize, threads, **tests)
-
-    parsed_res['bsize'] = bsize
-    parsed_res['fsize'] = size
-    parsed_res['time'] = int(time.time())
-    parsed_res['host'] = 'localhost'
-    parsed_res['threads'] = threads
-    parsed_res['mark'] = mark.split('/')
-
-    return parsed_res
-
-print iozone("/tmp/xxx.bin", '1', size=200, random_write=True, sync=True)
 
 # def run_iozone_once(executor, params, filename, timeout, fio_path='fio'):
 #     cmd_line = [fio_path,

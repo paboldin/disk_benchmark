@@ -7,6 +7,8 @@ import itertools
 import threading
 
 from fio import run_fio
+from iozone import run_iozone
+
 from common import subprocess_executor, get_paramiko_executor
 from common import Results, BenchmarkOption
 
@@ -15,15 +17,16 @@ def type_size(string):
     try:
         return re.match("\d+[KGBM]?", string, re.I).group(0)
     except:
-        msg = "{!r} don't looks like size-description string".format(string)
+        msg = "{0!r} don't looks like size-description string".format(string)
         raise ValueError(msg)
+
 
 def _parse_args(args):
     parser = argparse.ArgumentParser(
         description="Run set of `fio/iozone` invocations and return result")
     parser.add_argument(
         "--iodepth", metavar="IODEPTHS", nargs="+", type=int,
-        help="I/O depths to test", default=[1, 2, 4, 8])
+        help="I/O depths to test", default=[8])
     parser.add_argument(
         '-a', "--action", metavar="ACTIONS", nargs="+", type=str,
         help="actions to run",
@@ -52,21 +55,34 @@ def _parse_args(args):
     parser.add_argument(
         "-k", "--key-file", metavar="RSA_SECRET_KEY_FNAME",
         dest='keyfile')
-    parser.add_argument("--bench", metavar="BENCH_TYPE", 
-    				    choices=['fio', 'iozone'], default='fio')
+    parser.add_argument(
+        "-s", "--sync", default=False, action="store_true",
+        help="exec sync after each write")
+    parser.add_argument(
+        "-d", "--direct-io", default=False, action="store_true",
+        help="use O_DIRECT", dest='directio')
+    parser.add_argument("--bench", metavar="BENCH_TYPE",
+                        choices=['fio', 'iozone'], default='fio')
     parser.add_argument("--binpath", metavar="BENCH_BINARY", default=None)
 
     return parser.parse_args(args)
 
 
 def run_benchmark_th(res_q, executor, benchmark, filename, timeout,
-					 bench_param):
+                     bench_param):
     try:
         bench_type, bin_path = bench_param
         if bench_type == 'fio':
             res = run_fio(executor, benchmark, filename, timeout, bin_path)
-        #elif bench_type == 'iozone':
-        #    res = run_iozone(executor, benchmark, filename, timeout, bin_path)
+        elif bench_type == 'iozone':
+            res = run_iozone(executor, benchmark, filename, timeout, bin_path)
+
+        res.parameters = benchmark.__dict__
+        res.type = benchmark.action
+        res.block_size = benchmark.blocksize
+        res.concurence = benchmark.concurence
+        res.iodepth = benchmark.iodepth
+
     except:
         import traceback
         traceback.print_exc()
@@ -182,7 +198,27 @@ def format_results(args_obj, results):
         yield table.draw()
 
 
+def ssize_to_kb(ssize):
+    try:
+        smap = dict(k=1, K=1, M=1024, m=1024, G=1024 ** 2, g=1024 ** 2)
+        for ext, coef in smap.items():
+            if ssize.endswith(ext):
+                return int(ssize[:-1]) * coef
+
+        if int(ssize) % 1024 != 0:
+            raise ValueError()
+
+        return int(ssize) / 1024
+
+    except (ValueError, TypeError):
+        tmpl = "Unknow size format {0!r} (or size not multiples 1024)"
+        raise ValueError(tmpl.format(ssize))
+
+
 def do_main(args_obj):
+    args_obj.blocksize = map(ssize_to_kb, args_obj.blocksize)
+    args_obj.iosize = ssize_to_kb(args_obj.iosize)
+
     params = ([1], args_obj.iodepth, args_obj.action,
               args_obj.blocksize, [args_obj.iosize])
     all_combinations = itertools.product(*params)
@@ -190,7 +226,12 @@ def do_main(args_obj):
     benchmark_set = [BenchmarkOption(*product)
                      for product in all_combinations]
 
+    for bench in benchmark_set:
+        bench.direct_io = args_obj.directio
+        bench.sync = args_obj.sync
+
     timeout = args_obj.timeout
+
     if args_obj.total_time:
         if timeout:
             print "Both timeout and total_time parameters provided.",
@@ -200,9 +241,9 @@ def do_main(args_obj):
     executors = [create_executor(uri, args_obj.keyfile)
                  for uri in args_obj.executors]
 
-    bench_type_path = (args_obj.bench, 
-                       args_obj.binpath 
-                       if args_obj.binpath is not None 
+    bench_type_path = (args_obj.bench,
+                       args_obj.binpath
+                       if args_obj.binpath is not None
                        else args_obj.bench)
 
     result = run_benchmark_set(executors,
@@ -210,7 +251,7 @@ def do_main(args_obj):
                                bench_type_path,
                                timeout=timeout)
 
-    params = ["{!s}={!r}".format(k, v) for k, v in args_obj.__dict__.items()]
+    params = ["{0!s}={1!r}".format(k, v) for k, v in args_obj.__dict__.items()]
     args_obj.output.write(" ".join(params) + "\n\n")
 
     for line in format_results(args_obj, result):
