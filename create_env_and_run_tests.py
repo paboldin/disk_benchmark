@@ -3,6 +3,7 @@ import os
 import time
 import subprocess
 
+import paramiko
 from novaclient.client import Client as n_client
 from cinderclient.v1.client import Client as c_client
 
@@ -69,21 +70,26 @@ def wait_for_server_active(nova, server, timeout=240):
         server = nova.servers.get(server)
 
 
-def get_or_create_floating_ip(nova, pool=None):
+def get_or_create_floating_ip(nova, pool, used_ip):
     ip_list = nova.floating_ips.list()
-    ip_list = [ip for ip in ip_list if ip.instance_id is None]
 
     if pool is not None:
         ip_list = [ip for ip in ip_list if ip.pool == pool]
 
+    ip_list = [ip for ip in ip_list if ip.instance_id is None]
+    ip_list = [ip for ip in ip_list if ip.ip not in used_ip]
+
     if len(ip_list) > 0:
-        # don't forget to import random
         return ip_list[0]
     else:
         return nova.floating_ips.create(pool)
 
 
-def create_vms(nova, amount, keypair_name, vol_sz=1, img_name='TestVM'):
+def create_vms(nova, amount, keypair_name, vol_sz, img_name='TestVM',
+               network_zone_name=None):
+
+    network = nova.networks.find(label=network_zone_name)
+    nics = [{'net-id': network.id}]
     fl = nova.flavors.find(ram=512)
     img = nova.images.find(name=img_name)
     srvs = []
@@ -96,7 +102,7 @@ def create_vms(nova, amount, keypair_name, vol_sz=1, img_name='TestVM'):
         for i in range(amount_left):
             print "creating server"
             srv = nova.servers.create("ceph-test-{0}".format(counter),
-                                      flavor=fl, image=img,
+                                      flavor=fl, image=img, nics=nics,
                                       key_name=keypair_name)
             counter += 1
             new_srvs.append(srv)
@@ -129,7 +135,7 @@ def create_vms(nova, amount, keypair_name, vol_sz=1, img_name='TestVM'):
         print "attach volume to server"
         nova.volumes.create_server_volume(srv.id, vol.id, None)
         print "create floating ip"
-        flt_ip = get_or_create_floating_ip(nova)
+        flt_ip = get_or_create_floating_ip(nova, 'net04_ext', result.keys())
         print "attaching ip to server"
         srv.add_floating_ip(flt_ip)
         result[flt_ip.ip] = srv
@@ -166,30 +172,54 @@ def clear_all(nova):
     print "Clearing done (yet some volumes may still deleting)"
 
 
-def copy_fio(key_file, ip, fio_path, user):
-    params = (key_file, fio_path, user, ip)
-    cmd = 'scp -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -i {0} {1} {2}@{3}:/tmp/fio'.format(*params)
+def wait_ssh_ready(host, user, key_file, retry_count=10, timeout=5):
+    ssh = paramiko.SSHClient()
+    ssh.load_host_keys('/dev/null')
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    ssh.known_hosts = None
+
+    for i in range(retry_count):
+        try:
+            ssh.connect(host, username=user, key_filename=key_file,
+                        look_for_keys=False)
+            break
+        except:
+            if i == retry_count - 1:
+                raise
+            time.sleep(timeout)
+
+
+def copy_fio(key_file, ip, src_fio_path, user, dst_fio_path):
+    key_opts = '-o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no'
+    params = (key_file, src_fio_path, user, ip, key_opts, dst_fio_path)
+    cmd = 'scp {4} -i {0} {1} {2}@{3}:{5}'.format(*params)
     print "    " + cmd
     subprocess.check_call(cmd, shell=True)
 
 
-def prepare_host(key_file, ip, fio_path, user='cirros'):
+def prepare_host(key_file, ip, fio_path, dst_fio_path, user='cirros'):
+    print "Wait till ssh ready...."
+    wait_ssh_ready(ip, user, key_file)
+
     print "Preparing host >"
     print "    Coping fio"
-    copy_fio(key_file, ip, fio_path, user)
+    copy_fio(key_file, ip, fio_path, user, dst_fio_path)
+
+    key_opts = '-o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no'
+    args = (key_file, user, ip, key_opts)
+    cmd_format = "ssh {3} -i {0} {1}@{2} '{{0}}'".format(*args).format
 
     def exec_on_host(cmd):
         print "    " + cmd
         subprocess.check_call(cmd_format(cmd), shell=True)
 
-    cmd_format = "ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -i {0} {1}@{2} '{{0}}'".format(key_file, user, ip).format
     exec_on_host("sudo /usr/sbin/mkfs.ext4 /dev/vdb")
     exec_on_host("sudo /bin/mkdir /media/ceph")
     exec_on_host("sudo /bin/mount /dev/vdb /media/ceph")
     exec_on_host("sudo /bin/chmod a+rwx /media/ceph")
 
 
-def run_fio_test(key_file, ips):
+def run_fio_test(key_file, ips, dst_fio_path):
     class FIOParams(object):
         pass
 
@@ -197,13 +227,13 @@ def run_fio_test(key_file, ips):
     with open(res_name, "w") as fd:
         fp = FIOParams()
         fp.output = fd
-        fp.iodepth = [4] #[1, 4, 16, 64]
-        fp.action = ["randwrite"] #['randwrite', 'randread']
-        fp.blocksize = [512] #[512, 4096, 64 * 1024]
+        fp.iodepth = [1, 4, 16, 64]
+        fp.action = ['randwrite', 'randread']
+        fp.blocksize = [512, 4096, 64 * 1024]
         fp.iosize = '3GB'
         fp.keyfile = key_file
-        fp.fio = '/tmp/fio'
-        fp.timeout = 120
+        fp.fio = dst_fio_path
+        fp.timeout = 300
         fp.total_time = None
         fp.executors = ["ssh://cirros:-@{0}:/media/ceph/test.ceph".format(ip)
                         for ip in ips]
@@ -212,18 +242,34 @@ def run_fio_test(key_file, ips):
 
 
 def main():
+    dst_fio_path = '/dev/shm/fio'
+    img_name = 'TestVM'
+    vol_sz = 25
+    network_zone_name = 'net04'
+    amount = 10
+    keypair_name = 'ceph-test'
+    local_fio = 'fio'
+    rsa_key_file = 'ceph_test_rsa'
+
     nova = nova_connect()
     clear_all(nova)
-    # create_keypair(nova, 'koder', '/root/os_rsa.pub')
-    # create_vms(nova, 1, 'ceph-test')
-    ips = ['172.16.0.128']
-    for ip, host in create_vms(nova, 1, 'ceph-test', vol_sz=4, img_name='TestVM').items():
-        #create_vms(nova, 1, 'koder', img_name='cirros-0.3.2-x86_64-uec')
-        prepare_host('ceph_test_rsa', ip, 'fio')
-        ips.append(ip)
-    print "All setup done! Ips =", " ".join(ips)
-    print "Starting tests"
-    run_fio_test('os_rsa', ips)
+
+    try:
+        ips = []
+        params = dict(vol_sz=vol_sz, img_name=img_name)
+        params['network_zone_name'] = network_zone_name
+        params['amount'] = amount
+        params['keypair_name'] = keypair_name
+
+        for ip, host in create_vms(nova, **params).items():
+            prepare_host(rsa_key_file, ip, local_fio, dst_fio_path)
+            ips.append(ip)
+
+        print "All setup done! Ips =", " ".join(ips)
+        print "Starting tests"
+        run_fio_test('ceph_test_rsa', ips, dst_fio_path)
+    finally:
+        clear_all(nova)
 
 if __name__ == "__main__":
     exit(main())

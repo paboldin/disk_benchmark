@@ -22,6 +22,7 @@ import subprocess
 import sys
 import Queue
 import threading
+import os.path
 
 
 class BenchmarkOption(object):
@@ -112,7 +113,13 @@ def _run_benchmark_once(executor, params, filename, timeout, fio_path='fio'):
     if params.use_hight_io_priority:
         cmd_line.append("--prio=6")
 
-    return json.loads(executor(cmd_line))
+    raw_out = executor(cmd_line)
+    for counter in range(100):
+        fname = "/tmp/fio_raw_{0}_{1}.json".format(time.time(), counter)
+        if not os.path.exists(fname):
+            break
+    open(fname, "w").write(raw_out)
+    return json.loads(raw_out)
 
 
 _TYPE_SIZE_RE = re.compile("\d+[KGBM]?", re.I)
@@ -330,6 +337,10 @@ def do_main(args_obj):
                                benchmark_set,
                                timeout=timeout,
                                fio_path=args_obj.fio)
+
+    params = ["{0!s}={!r}".format(k, v) for k, v in args_obj.__dict__.items()]
+    args_obj.output.write(" ".join(params) + "\n\n")
+
     for line in format_results(args_obj, result):
         args_obj.output.write(line + "\n")
 
