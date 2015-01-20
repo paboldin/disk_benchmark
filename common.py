@@ -45,7 +45,7 @@ class Results(object):
 
 
 def subprocess_executor(cmd):
-    print "execute on localhost:", " ".join(cmd)
+    print "LOCALHOST >> " + " ".join(cmd) + "\n",
     return subprocess.Popen(cmd, stdout=subprocess.PIPE).stdout.read()
 subprocess_executor.node = 'localhost'
 
@@ -72,7 +72,7 @@ def get_paramiko_executor(host, user, password, key_file=None):
         ssh.connect(host, username=user, password=password)
 
     def paramiko_executor(cmd):
-        print "Try to execute", " ".join(cmd)
+        print host + " >> " + " ".join(cmd) + "\n",
         stdin, stdout, stderr = ssh.exec_command(" ".join(cmd))
         return stdout.read()
 

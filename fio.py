@@ -20,7 +20,9 @@ import os.path
 from common import Results
 
 
-def run_fio_once(executor, params, filename, timeout, fio_path='fio'):
+def run_fio_once(executor, params, filename, timeout, fio_path='fio',
+                 sync_obj=None):
+
     cmd_line = [fio_path,
                 "--name=%s" % params.action,
                 "--rw=%s" % params.action,
@@ -39,7 +41,10 @@ def run_fio_once(executor, params, filename, timeout, fio_path='fio'):
         cmd_line.append("--direct=1")
 
     if params.use_hight_io_priority:
-        cmd_line.append("--prio=6")
+        cmd_line.append("--prio=0")
+
+    if sync_obj:
+        sync_obj.wait()
 
     raw_out = executor(cmd_line)
     for counter in range(100):
@@ -50,12 +55,15 @@ def run_fio_once(executor, params, filename, timeout, fio_path='fio'):
     return json.loads(raw_out)
 
 
-def run_fio(executor, benchmark, filename, timeout, fio_path='fio'):
+def run_fio(executor, benchmark, filename, timeout, fio_path='fio',
+            sync_obj=None):
+
     job_output = run_fio_once(executor,
                               benchmark,
                               filename,
                               timeout,
-                              fio_path)
+                              fio_path,
+                              sync_obj=sync_obj)
     job_output = job_output["jobs"][0]
     res = Results()
 

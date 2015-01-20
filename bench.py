@@ -36,7 +36,7 @@ def _parse_args(args):
         help="single operation block size", default=["512", "4K", "64K"])
     parser.add_argument(
         "--timeout", metavar="TIMEOUT", type=int,
-        help="runtime of a single run", default=30)
+        help="runtime of a single run", default=None)
     parser.add_argument(
         "--total-time", metavar="TOTAL_TIME", type=int,
         help="total execution time", default=None)
@@ -69,13 +69,15 @@ def _parse_args(args):
 
 
 def run_benchmark_th(res_q, executor, benchmark, filename, timeout,
-                     bench_param):
+                     bench_param, sync_obj):
     try:
         bench_type, bin_path = bench_param
         if bench_type == 'fio':
-            res = run_fio(executor, benchmark, filename, timeout, bin_path)
+            res = run_fio(executor, benchmark, filename, timeout, bin_path,
+                          sync_obj=sync_obj)
         elif bench_type == 'iozone':
-            res = run_iozone(executor, benchmark, filename, timeout, bin_path)
+            res = run_iozone(executor, benchmark, filename, timeout, bin_path,
+                             sync_obj=sync_obj)
 
         res.parameters = benchmark.__dict__
         res.type = benchmark.action
@@ -88,6 +90,22 @@ def run_benchmark_th(res_q, executor, benchmark, filename, timeout,
         traceback.print_exc()
         res = None
     res_q.put((executor, res))
+
+
+class Barrier(object):
+    def __init__(self, counter):
+        self.counter = counter
+        self.c_lock = threading.Lock()
+        self.ready_loc = threading.Lock()
+        self.ready_loc.acquire()
+
+    def wait(self):
+        with self.c_lock:
+            self.counter -= 1
+            if self.counter == 0:
+                self.ready_loc.release()
+        self.ready_loc.acquire()
+        self.ready_loc.release()
 
 
 def run_benchmark_set(executors, benchmark_set, bench_type, timeout=30):
@@ -103,8 +121,12 @@ def run_benchmark_set(executors, benchmark_set, bench_type, timeout=30):
         q = Queue.Queue()
         threads = []
         stime = time.time()
+
+        sync_obj = Barrier(len(executors))
+
         for (executor, filename) in executors:
-            params = (q, executor, benchmark, filename, timeout, bench_type)
+            params = (q, executor, benchmark, filename, timeout, bench_type,
+                      sync_obj)
             th = threading.Thread(None, run_benchmark_th, None, params)
             th.daemon = True
             threads.append(th)
@@ -143,7 +165,7 @@ def run_benchmark_set(executors, benchmark_set, bench_type, timeout=30):
                     sq_dev = (result.bw_dev ** 2 * count + th_res.bw_dev ** 2)
                     result.bw_dev = (sq_dev / (count + 1)) ** 0.5
             else:
-                print "Node", executor.node, "fails to execute fio"
+                print "Node", executor.node, "fails to execute", bench_type
 
         for th in threads:
             th.join()
@@ -210,14 +232,16 @@ def ssize_to_kb(ssize):
 
         return int(ssize) / 1024
 
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, AttributeError):
         tmpl = "Unknow size format {0!r} (or size not multiples 1024)"
         raise ValueError(tmpl.format(ssize))
 
 
 def do_main(args_obj):
     args_obj.blocksize = map(ssize_to_kb, args_obj.blocksize)
-    args_obj.iosize = ssize_to_kb(args_obj.iosize)
+
+    if args_obj.iosize is not None:
+        args_obj.iosize = ssize_to_kb(args_obj.iosize)
 
     params = ([1], args_obj.iodepth, args_obj.action,
               args_obj.blocksize, [args_obj.iosize])

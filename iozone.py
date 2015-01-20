@@ -1,5 +1,5 @@
 import re
-from common import BenchmarkOption, Results
+from common import Results
 
 # run iozone disk io tests
 # see http://www.iozone.org/ for more detailes
@@ -115,11 +115,19 @@ class IOZoneParser(object):
 IOZoneParser.make_positions()
 
 
-def run_iozone(executor, params, filename, timeout, iozone_path='iozone'):
+def do_run_iozone(executor, params, filename, timeout, iozone_path='iozone',
+                  microsecond_mode=False, sync_obj=None):
+
     cmd = [iozone_path]
 
     if params.sync:
         cmd.append('-o')
+
+    if params.direct_io:
+        cmd.append('-I')
+
+    if microsecond_mode:
+        cmd.append('-N')
 
     all_files = []
     threads = int(params.concurence)
@@ -132,27 +140,44 @@ def run_iozone(executor, params, filename, timeout, iozone_path='iozone'):
         cmd.extend(('-f', filename))
         all_files.append(filename)
 
+    bsz = 1024 if params.size > 1024 else params.size
+    if params.size % bsz != 0:
+        fsz = (params.size // bsz + 1) * bsz
+    else:
+        fsz = params.size
+
+    for fname in all_files:
+        executor(["iozone", "-f", fname, "-i", "0",
+                  "-s",  str(fsz), "-r", str(bsz), "-w"])
+
     cmd.append('-i')
 
     if params.action == 'write':
         cmd.append("0")
     elif params.action == 'randwrite':
-        cmd.extend(("0", "-i", "2"))
+        cmd.append("2")
     else:
         raise ValueError("Unknown action {0!r}".format(params.action))
 
     cmd.extend(('-s', str(params.size)))
     cmd.extend(('-r', str(params.blocksize)))
 
+    if sync_obj is not None:
+        sync_obj.wait()
+
     raw_res = executor(cmd)
-    parsed_res = IOZoneParser.parse_iozone_res(raw_res, threads > 1)
+    try:
+        parsed_res = IOZoneParser.parse_iozone_res(raw_res, threads > 1)
 
-    res = Results()
+        res = Results()
 
-    if params.action == 'write':
-        res.bw_mean = parsed_res['write']
-    elif params.action == 'randwrite':
-        res.bw_mean = parsed_res['random write']
+        if params.action == 'write':
+            res.bw_mean = parsed_res['write']
+        elif params.action == 'randwrite':
+            res.bw_mean = parsed_res['random write']
+    except:
+        print raw_res
+        raise
 
     res.bw_dev = 0
     res.bw_max = res.bw_mean
@@ -161,62 +186,16 @@ def run_iozone(executor, params, filename, timeout, iozone_path='iozone'):
     return res
 
 
-if __name__ == "__main__":
-    from common import subprocess_executor
-    params = BenchmarkOption(1, 1, 'write', 4, 4 * 1024)
-    print run_iozone(subprocess_executor, params, "/tmp/xxx.bin", 0)
+def run_iozone(executor, params, filename, timeout, iozone_path='iozone',
+               sync_obj=None):
 
-
-# def run_iozone_once(executor, params, filename, timeout, fio_path='fio'):
-#     cmd_line = [fio_path,
-#                 "--name=%s" % params.action,
-#                 "--rw=%s" % params.action,
-#                 "--blocksize=%s" % params.blocksize,
-#                 "--ioengine=libaio",
-#                 "--iodepth=%d" % params.iodepth,
-#                 "--filename=%s" % filename,
-#                 "--size={0}".format(params.size),
-#                 "--timeout=%d" % timeout,
-#                 "--runtime=%d" % timeout,
-#                 "--numjobs={0}".format(params.concurence),
-#                 "--output-format=json"]
-
-#     if params.direct_io:
-#         cmd_line.append("--direct=1")
-
-#     if params.use_hight_io_priority:
-#         cmd_line.append("--prio=6")
-
-#     raw_out = executor(cmd_line)
-#     for counter in range(100):
-#         fname = "/tmp/fio_raw_{0}_{1}.json".format(time.time(), counter)
-#         if not os.path.exists(fname):
-#             break
-#     open(fname, "w").write(raw_out)
-#     return json.loads(raw_out)
-
-# def run_fio(executor, benchmark, filename, timeout, fio_path='fio'):
-#     job_output = run_fio_once(executor,
-#                               benchmark,
-#                               filename,
-#                               timeout,
-#                               fio_path)
-#     job_output = job_output["jobs"][0]
-#     res = Results()
-#     res.parameters = benchmark.__dict__
-#     res.type = benchmark.action
-
-#     if benchmark.action in ('write', 'randwrite'):
-#         raw_result = job_output['write']
-#     else:
-#         raw_result = job_output['read']
-
-#     res.block_size = benchmark.blocksize
-#     res.concurence = benchmark.concurence
-#     res.iodepth = benchmark.iodepth
-
-#     for field in 'bw_dev bw_mean bw_max bw_min'.split():
-#         setattr(res, field, raw_result[field])
-
-#     return res
-
+    if timeout is not None:
+        params.size = params.blocksize * 50
+        res_time = do_run_iozone(executor, params, filename, timeout,
+                                 iozone_path,
+                                 microsecond_mode=True)
+        size = (params.blocksize * timeout * 1000000) / res_time.bw_mean
+        size = (size // params.blocksize + 1) * params.blocksize
+        params.size = size
+    return do_run_iozone(executor, params, filename, timeout, iozone_path,
+                         sync_obj=sync_obj)
